@@ -1,0 +1,79 @@
+name: recon
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run = test sans scan"
+        type: choice
+        default: dry-run
+        options: [dry-run, passive, recon]
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TARGET: ${{ secrets.TARGET }}
+      MODE: ${{ inputs.mode }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: Cache outils
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/bin
+            ~/Tools
+            ~/nuclei-templates
+          key: ${{ runner.os }}-tools-v1
+
+      - name: Installer
+        run: |
+          chmod +x install.sh rvnxc.sh
+          [ -x "$HOME/go/bin/subfinder" ] || ./install.sh
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Config
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          DISCORD: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          {
+            echo "GITHUB_TOKEN=\"$GH_PAT\""
+            echo "DISCORD_WEBHOOK=\"$DISCORD\""
+          } > .env
+          sed -i 's/^NOTIFICATION=.*/NOTIFICATION=true/' rvnxc.cfg
+          sed -i 's/^HTTPX_RATELIMIT=.*/HTTPX_RATELIMIT=30/' rvnxc.cfg
+          sed -i 's/^NUCLEI_RATELIMIT=.*/NUCLEI_RATELIMIT=30/' rvnxc.cfg
+          sed -i 's/^FFUF_THREADS=.*/FFUF_THREADS=10/' rvnxc.cfg
+
+      - name: Test Discord
+        env:
+          DISCORD: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          curl -s -X POST -H "Content-Type: application/json" \
+            -d '{"content":"rvnXC: test GitHub Actions OK"}' "$DISCORD"
+
+      - name: Health check
+        run: ./rvnxc.sh --health-check
+
+      - name: Run
+        run: |
+          case "$MODE" in
+            dry-run) ./rvnxc.sh -d "$TARGET" -r --dry-run ;;
+            passive) ./rvnxc.sh -d "$TARGET" -p -y ;;
+            recon)   ./rvnxc.sh -d "$TARGET" -r -y ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: recon-report
+          path: Recon/
+          retention-days: 7
+          if-no-files-found: ignore
