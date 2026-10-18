@@ -4,18 +4,24 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "dry-run = test sans scan"
+        description: "dry-run = test, passive = recherche"
         type: choice
-        default: dry-run
-        options: [dry-run, passive, recon]
+        default: passive
+        options: [dry-run, passive]
+  schedule:
+    - cron: "0 3 * * *"
+
+concurrency:
+  group: recon
+  cancel-in-progress: false
 
 jobs:
   recon:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     env:
       TARGET: ${{ secrets.TARGET }}
-      MODE: ${{ inputs.mode }}
+      MODE: ${{ inputs.mode || 'passive' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -32,6 +38,13 @@ jobs:
             ~/nuclei-templates
           key: ${{ runner.os }}-tools-v1
 
+      - name: Cache résultats (pour --diff)
+        uses: actions/cache@v4
+        with:
+          path: Recon
+          key: recon-${{ github.run_id }}
+          restore-keys: recon-
+
       - name: Installer
         run: |
           chmod +x install.sh rvnxc.sh
@@ -47,17 +60,6 @@ jobs:
             echo "GITHUB_TOKEN=\"$GH_PAT\""
             echo "DISCORD_WEBHOOK=\"$DISCORD\""
           } > .env
-          sed -i 's/^NOTIFICATION=.*/NOTIFICATION=true/' rvnxc.cfg
-          sed -i 's/^HTTPX_RATELIMIT=.*/HTTPX_RATELIMIT=30/' rvnxc.cfg
-          sed -i 's/^NUCLEI_RATELIMIT=.*/NUCLEI_RATELIMIT=30/' rvnxc.cfg
-          sed -i 's/^FFUF_THREADS=.*/FFUF_THREADS=10/' rvnxc.cfg
-
-      - name: Test Discord
-        env:
-          DISCORD: ${{ secrets.DISCORD_WEBHOOK }}
-        run: |
-          curl -s -X POST -H "Content-Type: application/json" \
-            -d '{"content":"rvnXC: test GitHub Actions OK"}' "$DISCORD"
 
       - name: Health check
         run: ./rvnxc.sh --health-check
@@ -65,15 +67,18 @@ jobs:
       - name: Run
         run: |
           case "$MODE" in
-            dry-run) ./rvnxc.sh -d "$TARGET" -r --dry-run ;;
-            passive) ./rvnxc.sh -d "$TARGET" -p -y ;;
-            recon)   ./rvnxc.sh -d "$TARGET" -r -y ;;
+            dry-run) ./rvnxc.sh -d "$TARGET" -p --dry-run ;;
+            passive) ./rvnxc.sh -d "$TARGET" -p --diff -y ;;
           esac
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: recon-report
-          path: Recon/
+          path: |
+            Recon/*/report
+            Recon/*/hotlist.*
+            Recon/*/subdomains/takeovers.txt
+            Recon/*/subdomains/resolved.txt
           retention-days: 7
           if-no-files-found: ignore
