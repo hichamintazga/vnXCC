@@ -18,7 +18,7 @@ concurrency:
 jobs:
   recon:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 350
     env:
       TARGET: ${{ secrets.TARGET }}
       MODE: ${{ inputs.mode || 'passive' }}
@@ -38,8 +38,8 @@ jobs:
             ~/nuclei-templates
           key: ${{ runner.os }}-tools-v1
 
-      - name: Cache résultats (pour --diff)
-        uses: actions/cache@v4
+      - name: Restaurer résultats (pour --diff)
+        uses: actions/cache/restore@v4
         with:
           path: Recon
           key: recon-${{ github.run_id }}
@@ -60,6 +60,8 @@ jobs:
             echo "GITHUB_TOKEN=\"$GH_PAT\""
             echo "DISCORD_WEBHOOK=\"$DISCORD\""
           } > .env
+          cp rvnxc.cfg ci.cfg
+          sed -i 's/^WEBSCREENSHOT=.*/WEBSCREENSHOT=false/; s/^JSCHECKS=.*/JSCHECKS=false/; s/^URL_CHECK=.*/URL_CHECK=false/; s/^HTTPX_RATELIMIT=.*/HTTPX_RATELIMIT=150/' ci.cfg
 
       - name: Health check
         run: ./rvnxc.sh --health-check
@@ -67,18 +69,13 @@ jobs:
       - name: Run
         run: |
           case "$MODE" in
-            dry-run) ./rvnxc.sh -d "$TARGET" -p --dry-run ;;
-            passive) ./rvnxc.sh -d "$TARGET" -p --diff -y ;;
+            dry-run) ./rvnxc.sh -d "$TARGET" -p --dry-run -f ci.cfg ;;
+            passive) timeout 300m ./rvnxc.sh -d "$TARGET" -p --diff -y -f ci.cfg || true ;;
           esac
 
-      - uses: actions/upload-artifact@v4
+      - name: Sauvegarder résultats (même si timeout)
         if: always()
+        uses: actions/cache/save@v4
         with:
-          name: recon-report
-          path: |
-            Recon/*/report
-            Recon/*/hotlist.*
-            Recon/*/subdomains/takeovers.txt
-            Recon/*/subdomains/resolved.txt
-          retention-days: 7
-          if-no-files-found: ignore
+          path: Recon
+          key: recon-${{ github.run_id }}
