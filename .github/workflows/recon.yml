@@ -3,6 +3,10 @@ name: recon
 on:
   workflow_dispatch:
     inputs:
+      target:
+        description: "Domaine cible (vide = secret TARGET)"
+        type: string
+        required: false
       mode:
         description: "dry-run = test, passive = recherche"
         type: choice
@@ -12,25 +16,30 @@ on:
     - cron: "0 3 * * *"
 
 concurrency:
-  group: recon
+  group: recon-${{ inputs.target || 'default' }}
   cancel-in-progress: false
 
 jobs:
   recon:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 350
     env:
-      TARGET: ${{ secrets.TARGET }}
+      TARGET: ${{ inputs.target || secrets.TARGET }}
       MODE: ${{ inputs.mode || 'passive' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v5
+      - name: Valider la cible
+        run: |
+          [[ "$TARGET" =~ ^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$ ]] || { echo "Cible invalide"; exit 1; }
+
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
+          cache: false
 
       - name: Cache outils
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/go/bin
@@ -39,11 +48,11 @@ jobs:
           key: ${{ runner.os }}-tools-v1
 
       - name: Restaurer résultats (pour --diff)
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: Recon
-          key: recon-${{ github.run_id }}
-          restore-keys: recon-
+          key: recon-${{ env.TARGET }}-${{ github.run_id }}
+          restore-keys: recon-${{ env.TARGET }}-
 
       - name: Installer
         run: |
@@ -75,7 +84,41 @@ jobs:
 
       - name: Sauvegarder résultats (même si timeout)
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: Recon
-          key: recon-${{ github.run_id }}
+          key: recon-${{ env.TARGET }}-${{ github.run_id }}
+
+      - name: Envoyer résultats sur Discord
+        if: always()
+        env:
+          DISCORD: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          set +e
+          D=$(ls -d Recon/*/ 2>/dev/null | head -1)
+          if [ -z "$D" ]; then
+            jq -n --arg c "⚠️ Recon $TARGET : aucun résultat (job interrompu ?)" '{content:$c}' \
+              | curl -s -o /dev/null -H "Content-Type: application/json" -d @- "$DISCORD"
+            exit 0
+          fi
+
+          RES=$(wc -l < "${D}subdomains/resolved.txt" 2>/dev/null || echo 0)
+          TAK=$(wc -l < "${D}subdomains/takeovers.txt" 2>/dev/null || echo 0)
+          NEW=$(wc -l < "${D}subdomains/new.txt" 2>/dev/null || echo 0)
+          HOT=$(head -n 15 "${D}hotlist.txt" 2>/dev/null | cut -c1-110)
+
+          MSG=$(printf '📊 **Recon terminé : %s**\nSous-domaines résolus : %s\nNouveaux (diff) : %s\nTakeovers candidats : %s\n\n**Top hotlist :**\n```\n%s\n```' "$TARGET" "$RES" "$NEW" "$TAK" "$HOT")
+          jq -n --arg c "${MSG:0:1900}" '{content:$c}' \
+            | curl -s -o /dev/null -H "Content-Type: application/json" -d @- "$DISCORD"
+
+          mkdir -p /tmp/out
+          for f in hotlist.txt hotlist.json subdomains/takeovers.txt subdomains/new.txt subdomains/resolved.txt; do
+            [ -f "${D}${f}" ] && cp "${D}${f}" "/tmp/out/$(echo "$f" | tr / _)"
+          done
+          [ -d "${D}report" ] && cp -r "${D}report" /tmp/out/report
+          tar czf /tmp/recon-results.tgz -C /tmp/out .
+          if [ "$(stat -c%s /tmp/recon-results.tgz)" -gt 9000000 ]; then
+            rm -f /tmp/out/subdomains_resolved.txt
+            tar czf /tmp/recon-results.tgz -C /tmp/out .
+          fi
+          curl -s -o /dev/null -F "file=@/tmp/recon-results.tgz" "$DISCORD"
